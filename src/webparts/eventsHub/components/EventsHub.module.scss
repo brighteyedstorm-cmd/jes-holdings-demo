@@ -1,0 +1,86 @@
+/* Lora is loaded by EventsHubWebPart.onInit through SPComponentLoader.loadCss.
+   A CSS @import cannot live in this file: SPFx's css-loader crashes on one.
+
+   Everything the hub draws lives under .hub, so SharePoint page chrome stays
+   out and none of these rules leak onto the rest of the page. Values are the
+   prototype's, unchanged. */
+.hub {
+  :global {
+    * { -webkit-font-smoothing: antialiased; }
+
+    .jes-navbtn, .jes-primary, .jes-ghost, .jes-mini, .jes-icon, .jes-opt, .jes-uprow, .jes-task,
+    .jes-chip, .jes-link, .jes-search, .jes-rowx, .jes-calev {
+      transition: background .14s ease, color .14s ease, border-color .14s ease, opacity .14s ease, filter .14s ease, box-shadow .14s ease;
+    }
+
+    .jes-card { transition: transform .16s ease, box-shadow .16s ease, border-color .16s ease; }
+    .jes-card:hover { transform: translateY(-3px); box-shadow: 0 12px 30px rgba(26, 33, 31, .09); border-color: #AAB2AD !important; }
+
+    .jes-row, .jes-tile { transition: box-shadow .15s ease, border-color .15s ease, transform .15s ease; }
+    .jes-row:hover, .jes-tile:hover { box-shadow: 0 8px 22px rgba(26, 33, 31, .07); border-color: #AAB2AD !important; }
+    .jes-tile:hover .jes-tile-arrow { opacity: 1 !important; }
+
+    .jes-navbtn:not(.active):hover { background: #F4F6F5 !important; }
+    .jes-navbtn.active:hover { background: #1E2825 !important; }
+    .jes-primary:hover { background: #1E2825 !important; }
+    .jes-ghost:hover, .jes-mini:hover { border-color: #AAB2AD !important; color: #1A211F !important; }
+    .jes-icon:hover { background: #F7F8F8 !important; color: #1A211F !important; }
+    .jes-link:hover { color: #1A211F !important; text-decoration: underline; }
+    .jes-search:hover { border-color: #AAB2AD !important; }
+    .jes-opt:hover, .jes-uprow:hover, .jes-task:hover, .jes-chip:hover { background: #F7F8F8 !important; }
+    .jes-task:hover .jes-rowx { opacity: 1 !important; }
+    .jes-calev:hover { filter: brightness(.96); }
+
+    input:focus, select:focus { border-color: #2E3A37 !important; box-shadow: 0 0 0 3px #F4F6F5; }
+    button:focus-visible, input:focus-visible, select:focus-visible, a:focus-visible { outline: 2px solid #2E3A37; outline-offset: 2px; }
+
+    .jes-view { animation: jesview .32s cubic-bezier(.22, 1, .36, 1); }
+    @keyframes :global(jesview) { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: translateY(0); } }
+
+    .jes-drawer { animation: jesslide .3s cubic-bezier(.22, 1, .36, 1); }
+    @keyframes :global(jesslide) { from { transform: translateX(36px); opacity: .3; } to { transform: translateX(0); opacity: 1; } }
+
+    .jes-modal, .jes-cmdk, .jes-pop { animation: jespop .2s cubic-bezier(.22, 1, .36, 1); }
+    @keyframes :global(jespop) { from { transform: scale(.97); opacity: 0; } to { transform: scale(1); opacity: 1; } }
+
+    .jes-scrim { animation: jesfade .2s ease; }
+    @keyframes :global(jesfade) { from { opacity: 0; } to { opacity: 1; } }
+
+    .jes-toast { animation: jestoast .26s cubic-bezier(.22, 1, .36, 1); pointer-events: auto; }
+    @keyframes :global(jestoast) { from { transform: translateY(10px); opacity: 0; } to { transform: translateY(0); opacity: 1; } }
+
+    ::-webkit-scrollbar { width: 10px; height: 10px; }
+    ::-webkit-scrollbar-thumb { background: #E4E8E6; border-radius: 9px; }
+    ::-webkit-scrollbar-thumb:hover { background: #AAB2AD; }
+    ::-webkit-scrollbar-track { background: transparent; }
+
+    /* The tenant people picker sits inside the hub's own popovers, so it is
+       sized down to the surrounding rows rather than restyled. */
+    .jes-pp .ms-BasePicker-text { border: none; background: transparent; min-height: 30px; }
+    .jes-pp .ms-BasePicker-input { font-size: 13px; font-family: inherit; }
+    .jes-pp .ms-Persona-primaryText { font-size: 13px; }
+
+    @media (prefers-reduced-motion: reduce) {
+      * { animation: none !important; transition: none !important; }
+    }
+
+    @media (max-width: 860px) {
+      .jes-ov-grid, .jes-cal-grid { grid-template-columns: minmax(0, 1fr) !important; }
+    }
+
+    @media (max-width: 640px) {
+      .jes-view { padding: 14px !important; }
+      .jes-tile { flex-basis: calc(50% - 7px) !important; }
+      .jes-head { padding: 11px 14px !important; gap: 10px !important; }
+      .jes-filterbar { padding: 10px 14px !important; }
+      .jes-search { display: none !important; }
+      .jes-day { min-height: 56px !important; padding: 3px !important; }
+      .jes-dow { padding: 7px 4px !important; }
+      .jes-calev { font-size: 10px !important; padding: 1px 5px !important; }
+    }
+
+    @media (max-width: 520px) {
+      .jes-phasepill { display: none !important; }
+    }
+  }
+}

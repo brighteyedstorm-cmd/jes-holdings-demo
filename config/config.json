@@ -1,0 +1,19 @@
+{
+  "$schema": "https://developer.microsoft.com/json-schemas/spfx-build/config.2.0.schema.json",
+  "version": "2.0",
+  "bundles": {
+    "events-hub-web-part": {
+      "components": [
+        {
+          "entrypoint": "./lib/webparts/eventsHub/EventsHubWebPart.js",
+          "manifest": "./src/webparts/eventsHub/EventsHubWebPart.manifest.json"
+        }
+      ]
+    }
+  },
+  "externals": {},
+  "localizedResources": {
+    "EventsHubWebPartStrings": "lib/webparts/eventsHub/loc/{locale}.js",
+    "ControlStrings": "node_modules/@pnp/spfx-controls-react/lib/loc/{locale}.js"
+  }
+}

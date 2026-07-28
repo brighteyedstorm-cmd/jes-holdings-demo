@@ -1,0 +1,40 @@
+{
+  "$schema": "https://developer.microsoft.com/json-schemas/spfx-build/package-solution.schema.json",
+  "solution": {
+    "name": "JES Events and Engagement hub",
+    "id": "534a85c1-c064-4dfa-b4a4-884b51f738f1",
+    "version": "1.0.0.0",
+    "includeClientSideAssets": true,
+    "skipFeatureDeployment": true,
+    "isDomainIsolated": false,
+    "developer": {
+      "name": "JES Holdings",
+      "websiteUrl": "",
+      "privacyUrl": "",
+      "termsOfUseUrl": "",
+      "mpnId": "Undefined-1.22.2"
+    },
+    "metadata": {
+      "shortDescription": {
+        "default": "Turns the document libraries on the Events and Engagement site into a managed events portal."
+      },
+      "longDescription": {
+        "default": "Discovers the document libraries on the Events and Engagement site, tracks each one as an event with a section, category, schedule, and status, and manages a per event checklist with assignees and due dates."
+      },
+      "screenshotPaths": [],
+      "videoUrl": "",
+      "categories": []
+    },
+    "features": [
+      {
+        "title": "jes-events-hub Feature",
+        "description": "The feature that activates elements of the jes-events-hub solution.",
+        "id": "2e25af8b-d566-44eb-8f55-c7dddf1667cd",
+        "version": "1.0.0.0"
+      }
+    ]
+  },
+  "paths": {
+    "zippedPackage": "solution/jes-events-hub.sppkg"
+  }
+}

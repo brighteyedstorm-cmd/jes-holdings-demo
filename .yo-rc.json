@@ -1,0 +1,21 @@
+{
+  "@microsoft/generator-sharepoint": {
+    "plusBeta": false,
+    "isCreatingSolution": true,
+    "nodeVersion": "22.14.0",
+    "sdksVersions": {},
+    "version": "1.22.2",
+    "libraryName": "jes-events-hub",
+    "libraryId": "534a85c1-c064-4dfa-b4a4-884b51f738f1",
+    "environment": "spo",
+    "whichFolder": "current",
+    "useGulp": true,
+    "packageManager": "npm",
+    "solutionName": "jes-events-hub",
+    "solutionShortDescription": "JES Events and Engagement hub",
+    "skipFeatureDeployment": true,
+    "isDomainIsolated": false,
+    "componentType": "webpart",
+    "template": "react"
+  }
+}
