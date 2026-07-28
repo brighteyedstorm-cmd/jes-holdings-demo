@@ -1,12 +1,13 @@
 import * as React from 'react';
 import { ChevronDown } from 'lucide-react';
-import { IPeoplePickerContext, PeoplePicker, PrincipalType } from '@pnp/spfx-controls-react/lib/PeoplePicker';
+import { IPeoplePickerContext } from '@pnp/spfx-controls-react/lib/PeoplePicker';
 import { WebPartContext } from '@microsoft/sp-webpart-base';
 
 import { T } from '../model/constants';
 import { IPerson } from '../model/types';
 import { input } from './styles';
 import { Avatar } from './primitives';
+import { ITenantPickerProps } from './TenantPicker';
 
 export interface IPeoplePickerFieldProps {
   context: WebPartContext;
@@ -18,21 +19,23 @@ export interface IPeoplePickerFieldProps {
   placeholder?: string;
 }
 
-interface IPickedUser {
-  id?: string;
-  loginName?: string;
-  text?: string;
-  secondaryText?: string;
-}
+type PickerComponent = React.ComponentType<ITenantPickerProps>;
+
+let loadedPicker: PickerComponent | undefined;
 
 /**
  * The prototype's compact assignee control, driven by the tenant directory.
  * Selection is single, the whole organization is searched, and clearing the
  * field leaves the task unassigned. The current user is never the default.
+ *
+ * The directory control itself arrives in its own chunk the first time a field
+ * is opened, so it stays out of the hub's initial download.
  */
 export const PeoplePickerField = (props: IPeoplePickerFieldProps): JSX.Element => {
   const { context, value, onChange, direction = 'down', small, placeholder = 'Assign to…' } = props;
   const [open, setOpen] = React.useState(false);
+  const [Picker, setPicker] = React.useState<PickerComponent | undefined>(() => loadedPicker);
+  const [pickerFailed, setPickerFailed] = React.useState(false);
   const ref = React.useRef<HTMLDivElement>(null);
 
   React.useEffect(() => {
@@ -44,26 +47,25 @@ export const PeoplePickerField = (props: IPeoplePickerFieldProps): JSX.Element =
     return () => document.removeEventListener('mousedown', handler);
   }, [open]);
 
+  React.useEffect(() => {
+    if (!open || Picker) return undefined;
+    let cancelled = false;
+    import(/* webpackChunkName: 'tenant-picker' */ './TenantPicker')
+      .then((mod) => {
+        loadedPicker = mod.default;
+        // Wrapped, because React would otherwise call the component as an updater.
+        if (!cancelled) setPicker(() => mod.default);
+      })
+      .catch(() => { if (!cancelled) setPickerFailed(true); });
+    return () => { cancelled = true; };
+  }, [open, Picker]);
+
   const pad = small ? '6px 9px' : '9px 11px';
 
   const pickerContext: IPeoplePickerContext = {
     absoluteUrl: context.pageContext.web.absoluteUrl,
     msGraphClientFactory: context.msGraphClientFactory,
     spHttpClient: context.spHttpClient
-  };
-
-  const handleChange = (items: IPickedUser[]): void => {
-    if (!items || !items.length) return;
-    const picked = items[0];
-    const id = Number(picked.id);
-    if (!id || isNaN(id)) return;
-    onChange({
-      id,
-      title: picked.text || '',
-      email: picked.secondaryText || '',
-      loginName: picked.loginName || ''
-    });
-    setOpen(false);
   };
 
   return (
@@ -90,19 +92,14 @@ export const PeoplePickerField = (props: IPeoplePickerFieldProps): JSX.Element =
           }}
         >
           <div className="jes-pp" style={{ padding: 8, borderBottom: `1px solid ${T.lineSoft}` }}>
-            <PeoplePicker
-              context={pickerContext}
-              personSelectionLimit={1}
-              principalTypes={[PrincipalType.User]}
-              resolveDelay={300}
-              searchTextLimit={2}
-              ensureUser={true}
-              showtooltip={false}
-              showHiddenInUI={false}
-              placeholder="Search people…"
-              defaultSelectedUsers={[]}
-              onChange={handleChange as (items: unknown[]) => void}
-            />
+            {Picker && <Picker pickerContext={pickerContext} onPick={(person) => { onChange(person); setOpen(false); }} />}
+            {!Picker && !pickerFailed && <div style={{ padding: '7px 4px', fontSize: 12.5, color: T.faint }}>Loading the directory…</div>}
+            {!Picker && pickerFailed && (
+              <button
+                type="button" onClick={() => { setPickerFailed(false); }}
+                style={{ padding: '7px 4px', fontSize: 12.5, color: T.muted, background: 'none', border: 'none', cursor: 'pointer', textAlign: 'left' }}
+              >Could not load the directory. Try again.</button>
+            )}
           </div>
           <div style={{ padding: 6 }}>
             <button

@@ -8,7 +8,7 @@ import {
 import styles from './EventsHub.module.scss';
 import { ENTITY_NAMES, STATUS, STATUS_NAMES, T } from '../model/constants';
 import {
-  ICategory, IEventItem, IFilters, ILibrary, INewEvent, IPerson, IPhase, ISubcategory, ITask, ITemplate
+  ICategory, IEventItem, IFilters, IHubData, ILibrary, INewEvent, IPerson, IPhase, ISubcategory, ITask, ITemplate
 } from '../model/types';
 import { buildTaxonomy, initials, samePerson } from '../model/helpers';
 import { HubService } from '../services/HubService';
@@ -43,6 +43,40 @@ const VIEW_TITLE: { [key: string]: string } = {
 };
 
 const SAVE_FAILED = 'Could not save. Try again.';
+
+/* The last load is kept so returning to the page paints at once instead of
+   waiting on SharePoint. It is only ever the first frame: the real read is
+   already on its way and replaces it a moment later. Anything older than the
+   window below is ignored, and nothing is ever written from the cache. */
+const CACHE_VERSION = 'jes-events-hub.v1';
+const CACHE_MAX_AGE = 12 * 60 * 60 * 1000;
+const CACHE_MAX_BYTES = 2 * 1024 * 1024;
+const cacheKey = (siteUrl: string): string => `${CACHE_VERSION}:${siteUrl}`;
+
+interface ICacheEntry { savedAt: number; data: IHubData; }
+
+const readCache = (siteUrl: string): IHubData | undefined => {
+  try {
+    const raw = window.localStorage.getItem(cacheKey(siteUrl));
+    if (!raw) return undefined;
+    const entry = JSON.parse(raw) as ICacheEntry;
+    if (!entry || !entry.data || !entry.data.events) return undefined;
+    if (Date.now() - entry.savedAt > CACHE_MAX_AGE) return undefined;
+    return entry.data;
+  } catch {
+    return undefined;
+  }
+};
+
+const writeCache = (siteUrl: string, data: IHubData, libraries: ILibrary[]): void => {
+  try {
+    const payload = JSON.stringify({ savedAt: Date.now(), data: { ...data, libraries } });
+    if (payload.length > CACHE_MAX_BYTES) return;
+    window.localStorage.setItem(cacheKey(siteUrl), payload);
+  } catch {
+    // A full or blocked storage only costs the instant first paint.
+  }
+};
 
 export const EventsHub = (props: IEventsHubProps): JSX.Element => {
   const { context } = props;
@@ -79,38 +113,86 @@ export const EventsHub = (props: IEventsHubProps): JSX.Element => {
   /* ---------------------------------------------------------------- */
   /*  Load                                                            */
   /* ---------------------------------------------------------------- */
-  const applyData = React.useCallback((load: Awaited<ReturnType<HubService['load']>>) => {
+  const applyData = React.useCallback((load: IHubData, keepLibraries: boolean) => {
     setEvents(load.events);
-    setLibraries(load.libraries);
     setPhases(load.phases);
     setCategories(load.categories);
     setSubcategories(load.subcategories);
     setTemplates(load.templates);
+    if (!keepLibraries) setLibraries(load.libraries);
   }, []);
 
   const reload = React.useCallback(async (): Promise<void> => {
     const load = await service.load();
-    applyData(load);
+    applyData(load, true);
   }, [service, applyData]);
 
   React.useEffect(() => {
     let cancelled = false;
+
+    // Paint from the last known state first, so coming back to the page is
+    // immediate, then replace it with what the server says.
+    const cached = readCache(service.siteUrl);
+    if (cached) {
+      applyData(cached, false);
+      setStage('ready');
+    }
+
     const boot = async (): Promise<void> => {
+      if (!cached) setStage('loading');
+      let load: IHubData;
       try {
-        await service.ensureLists();
-        if (cancelled) return;
-        setStage('loading');
-        const load = await service.load();
-        if (cancelled) return;
-        applyData(load);
-        setStage('ready');
+        // The happy path is one batched read. A successful load also proves the
+        // whole schema is in place, since it selects every field the hub uses.
+        load = await service.load();
       } catch {
-        if (!cancelled) setStage('failed');
+        // Either the lists are not there yet or something is missing from them.
+        try {
+          await service.ensureLists();
+          load = await service.load();
+        } catch {
+          if (!cancelled && !cached) setStage('failed');
+          return;
+        }
+      }
+      if (cancelled) return;
+      applyData(load, false);
+      setStage('ready');
+
+      // Discovery costs a request per untracked library, and only the add flow
+      // and the Manage counts need it, so it follows the first paint.
+      try {
+        const discovered = await service.loadLibraries(load.events);
+        if (cancelled) return;
+        setLibraries(discovered);
+      } catch {
+        // Without discovery the hub still works, the add flow just has nothing to offer.
+      }
+
+      // Restore the seeds only if someone emptied them.
+      try {
+        const reseeded = await service.reseedIfEmpty(load.phases, load.templates);
+        if (reseeded && !cancelled) {
+          const fresh = await service.load();
+          if (!cancelled) applyData(fresh, true);
+        }
+      } catch {
+        // Nothing to tell the user. The next load tries again.
       }
     };
-    boot().catch(() => setStage('failed'));
+
+    boot().catch(() => { if (!cancelled && !cached) setStage('failed'); });
     return () => { cancelled = true; };
   }, [service, applyData]);
+
+  /* Whatever is on screen is what the next visit paints first. */
+  React.useEffect(() => {
+    if (stage !== 'ready') return undefined;
+    const timer = window.setTimeout(() => {
+      writeCache(service.siteUrl, { events, libraries, phases, categories, subcategories, templates }, libraries);
+    }, 800);
+    return () => window.clearTimeout(timer);
+  }, [stage, events, libraries, phases, categories, subcategories, templates, service]);
 
   /** Every write goes through here, so a failure always says so and resyncs. */
   const write = React.useCallback((msg: string, fn: () => Promise<void>): void => {

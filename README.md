@@ -48,13 +48,13 @@ src/webparts/eventsHub/
     Drawer.tsx PhaseEditor.tsx TemplateModal.tsx
     AddModal.tsx CommandPalette.tsx Toasts.tsx
     PeoplePickerField.tsx       the compact assignee control, tenant directory
+    TenantPicker.tsx            the directory control itself, loaded on demand
 ```
 
 ## How data flows
 
-`HubService` owns SharePoint. On first load it creates any missing list, field,
-or seed row, then reads everything into one shape that mirrors the prototype's
-in memory model, so the views stayed close to the original.
+`HubService` owns SharePoint. It reads everything into one shape that mirrors
+the prototype's in memory model, so the views stayed close to the original.
 
 Writes are optimistic. The view updates immediately, the write follows, and the
 toast appears only once the write resolves. A failure shows "Could not save. Try
@@ -64,6 +64,28 @@ once the typing settles rather than on every keystroke.
 
 Category and Subcategory are lookups on purpose. Renaming a category in Manage
 propagates to every event pointing at it without touching the event rows.
+
+## What a page load costs
+
+The hub is built so a visit is one request, not a queue of them:
+
+- **No provisioning on the normal path.** A successful read proves the whole
+  schema is there, because it selects every field the hub uses. `ensureLists`
+  only runs if that read fails, which is the first ever load, or a repair.
+- **One batched read.** The six list reads leave together in a single `$batch`.
+- **Discovery follows the first paint.** Finding untracked libraries costs a
+  property bag read per library, and only the add flow and the Manage counts
+  need it, so the hub is already on screen while it finishes.
+- **The last state paints immediately.** Each visit starts from what was on
+  screen last time, held in `localStorage` for twelve hours, then the real read
+  replaces it. Nothing is ever written back from the cache, and the store holds
+  the same event data the page shows, so treat it like any cached page content.
+- **The directory control is a separate chunk.** The tenant people picker brings
+  Fluent with it, about two thirds of the download, and arrives the first time
+  someone opens an assignee field. Initial download is 194 KB rather than 591 KB.
+
+Together that turns a visit from roughly twenty round trips into one, and a
+repeat visit into an instant paint with one read behind it.
 
 ## Notes on the port
 

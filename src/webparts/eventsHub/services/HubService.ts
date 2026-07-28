@@ -7,6 +7,7 @@ import '@pnp/sp/fields';
 import '@pnp/sp/folders';
 import '@pnp/sp/views';
 import '@pnp/sp/site-users/web';
+import '@pnp/sp/batching';
 import { IList } from '@pnp/sp/lists';
 import { DateTimeFieldFormatType, FieldUserSelectionMode } from '@pnp/sp/fields';
 
@@ -29,6 +30,89 @@ const toPerson = (raw: IRawPerson | undefined): IPerson | undefined => {
   return { id: raw.Id, title: raw.Title || '', email: raw.EMail || '', loginName: raw.Name || '' };
 };
 
+interface IRawPhase { Id: number; Title: string; SortOrder?: number; }
+interface IRawCategory { Id: number; Title: string; Section?: string; SortOrder?: number; }
+interface IRawSubcategory { Id: number; Title: string; CategoryId?: number; SortOrder?: number; }
+interface IRawTemplate { Id: number; Title: string; IsBuiltin?: boolean; TasksJson?: string; }
+interface IRawEvent {
+  Id: number; Title: string; LibraryId?: string; LibraryServerRelativeUrl?: string;
+  Section?: string; Status?: string; EventDate?: string; EventTime?: string; Venue?: string;
+  Category?: { Id: number; Title: string }; Subcategory?: { Id: number; Title: string };
+}
+interface IRawTask {
+  Id: number; Title: string; Completed?: boolean; DueDate?: string;
+  Event?: { Id: number }; Phase?: { Id: number; Title: string }; AssignedTo?: IRawPerson;
+}
+
+/** Adoption inheritance: EventSection, EventCategory, EventSubcategory on the root folder. */
+const readInherited = (props: { [key: string]: unknown } | undefined): { entity: string; cat: string; sub: string } => {
+  const bag = props || {};
+  const read = (key: string): string => {
+    const direct = bag[key];
+    if (typeof direct === 'string') return direct;
+    // SharePoint encodes some property bag keys, so fall back to a loose match.
+    const match = Object.keys(bag).filter((k) => k.replace(/_x[0-9a-f]{4}_/gi, '').toLowerCase() === key.toLowerCase())[0];
+    const value = match ? bag[match] : undefined;
+    return typeof value === 'string' ? value : '';
+  };
+  const entity = read(PROPERTY_BAG_KEYS.section);
+  return {
+    entity: ENTITY_NAMES.indexOf(entity) > -1 ? entity : '',
+    cat: read(PROPERTY_BAG_KEYS.category),
+    sub: read(PROPERTY_BAG_KEYS.subcategory)
+  };
+};
+
+const mapPhases = (items: IRawPhase[]): IPhase[] => items
+  .map((i) => ({ id: i.Id, title: i.Title, sortOrder: i.SortOrder || 0 }))
+  .sort((a, b) => (a.sortOrder - b.sortOrder) || (a.id - b.id));
+
+const mapCategories = (items: IRawCategory[]): ICategory[] =>
+  items.map((i) => ({ id: i.Id, title: i.Title, section: i.Section || '', sortOrder: i.SortOrder || 0 }));
+
+const mapSubcategories = (items: IRawSubcategory[]): ISubcategory[] =>
+  items.map((i) => ({ id: i.Id, title: i.Title, categoryId: i.CategoryId || 0, sortOrder: i.SortOrder || 0 }));
+
+const mapTemplates = (items: IRawTemplate[]): ITemplate[] => items.map((i) => {
+  let tasks: ITemplateTask[] = [];
+  try {
+    const parsed = JSON.parse(i.TasksJson || '[]');
+    if (Array.isArray(parsed)) tasks = parsed as ITemplateTask[];
+  } catch {
+    tasks = [];
+  }
+  return { id: i.Id, name: i.Title, builtin: !!i.IsBuiltin, tasks };
+}).sort((a, b) => (a.builtin === b.builtin ? a.name.localeCompare(b.name) : (a.builtin ? -1 : 1)));
+
+const mapRegistry = (items: IRawEvent[]): IEventItem[] => items.map((i) => ({
+  id: i.Id,
+  name: i.Title,
+  libraryId: (i.LibraryId || '').toLowerCase(),
+  libraryUrl: i.LibraryServerRelativeUrl || '',
+  entity: i.Section || '',
+  cat: i.Category && i.Category.Title ? i.Category.Title : '',
+  sub: i.Subcategory && i.Subcategory.Title ? i.Subcategory.Title : '',
+  catId: i.Category && i.Category.Id ? i.Category.Id : 0,
+  subId: i.Subcategory && i.Subcategory.Id ? i.Subcategory.Id : 0,
+  status: i.Status || 'Planning',
+  date: fromSpDate(i.EventDate),
+  time: i.EventTime || '',
+  venue: i.Venue || '',
+  tasks: []
+}));
+
+const mapTasks = (items: IRawTask[]): { eventId: number; task: ITask }[] => items.map((i) => ({
+  eventId: i.Event && i.Event.Id ? i.Event.Id : 0,
+  task: {
+    id: i.Id,
+    text: i.Title,
+    phase: i.Phase && i.Phase.Title ? i.Phase.Title : '',
+    done: !!i.Completed,
+    due: fromSpDate(i.DueDate),
+    who: toPerson(i.AssignedTo)
+  }
+}));
+
 export class HubService {
   private sp: SPFI;
   public readonly siteUrl: string;
@@ -42,7 +126,10 @@ export class HubService {
   /*  Provisioning                                                    */
   /* ================================================================ */
 
-  /** Creates any missing list, field, or seed row. Safe to run on every load. */
+  /** Creates any missing list, field, or seed row.
+   *  This is the repair path. A successful load() proves the whole schema is
+   *  present, because it selects every field the hub uses, so the normal load
+   *  never pays for these checks. */
   public async ensureLists(): Promise<void> {
     const registry = await this.ensureList(LISTS.registry, 'Events tracked by the JES Events and Engagement hub. One row per adopted document library.');
     const phases = await this.ensureList(LISTS.phases, 'The phases a checklist is grouped by.');
@@ -158,15 +245,31 @@ export class HubService {
   /*  Reading                                                         */
   /* ================================================================ */
 
+  /** Everything the views need for a first paint, in a single $batch round trip.
+   *  Library discovery is deliberately not part of this. It only feeds the add
+   *  flow and the Manage counts, and it costs a request per untracked library,
+   *  so loadLibraries() runs separately once the hub is already on screen. */
   public async load(): Promise<IHubData> {
-    const [phases, categories, subcategories, templates, rawEvents, rawTasks] = await Promise.all([
-      this.loadPhases(),
-      this.loadCategories(),
-      this.loadSubcategories(),
-      this.loadTemplates(),
-      this.loadRegistry(),
-      this.loadTasks()
-    ]);
+    const [batch, execute] = this.sp.batched();
+
+    let phases: IPhase[] = [];
+    let categories: ICategory[] = [];
+    let subcategories: ISubcategory[] = [];
+    let templates: ITemplate[] = [];
+    let rawEvents: IEventItem[] = [];
+    let rawTasks: { eventId: number; task: ITask }[] = [];
+
+    const pending = [
+      this.phasesQuery(batch).then((r) => { phases = mapPhases(r); }),
+      this.categoriesQuery(batch).then((r) => { categories = mapCategories(r); }),
+      this.subcategoriesQuery(batch).then((r) => { subcategories = mapSubcategories(r); }),
+      this.templatesQuery(batch).then((r) => { templates = mapTemplates(r); }),
+      this.registryQuery(batch).then((r) => { rawEvents = mapRegistry(r); }),
+      this.tasksQuery(batch).then((r) => { rawTasks = mapTasks(r); })
+    ];
+
+    await execute();
+    await Promise.all(pending);
 
     const byEvent: { [eventId: number]: ITask[] } = {};
     rawTasks.forEach((row) => {
@@ -176,98 +279,65 @@ export class HubService {
     });
 
     const events: IEventItem[] = rawEvents.map((e) => ({ ...e, tasks: byEvent[e.id] || [] }));
-    const libraries = await this.discoverLibraries(events);
-
-    return { events, libraries, phases, categories, subcategories, templates };
+    return { events, libraries: [], phases, categories, subcategories, templates };
   }
 
-  private async loadPhases(): Promise<IPhase[]> {
-    const items: { Id: number; Title: string; SortOrder?: number }[] =
-      await this.sp.web.lists.getByTitle(LISTS.phases).items.select('Id', 'Title', 'SortOrder').top(500)();
-    return items
-      .map((i) => ({ id: i.Id, title: i.Title, sortOrder: i.SortOrder || 0 }))
-      .sort((a, b) => (a.sortOrder - b.sortOrder) || (a.id - b.id));
+  /** The libraries on the site that are not tracked yet. */
+  public async loadLibraries(events: IEventItem[]): Promise<ILibrary[]> {
+    return this.discoverLibraries(events);
   }
 
-  private async loadCategories(): Promise<ICategory[]> {
-    const items: { Id: number; Title: string; Section?: string; SortOrder?: number }[] =
-      await this.sp.web.lists.getByTitle(LISTS.categories).items.select('Id', 'Title', 'Section', 'SortOrder').top(2000)();
-    return items.map((i) => ({ id: i.Id, title: i.Title, section: i.Section || '', sortOrder: i.SortOrder || 0 }));
-  }
+  /** Restores the seed rows if someone emptied the phases or removed a preset.
+   *  Takes what load() already read, so it costs nothing when nothing is missing. */
+  public async reseedIfEmpty(phases: IPhase[], templates: ITemplate[]): Promise<boolean> {
+    const missingPhases = SEED_PHASES.filter((p) => phases.filter((x) => x.title === p).length === 0);
+    const missingTemplates = SEED_TEMPLATES.filter((t) => templates.filter((x) => x.name === t.name).length === 0);
+    if (!missingPhases.length && !missingTemplates.length) return false;
 
-  private async loadSubcategories(): Promise<ISubcategory[]> {
-    const items: { Id: number; Title: string; CategoryId?: number; SortOrder?: number }[] =
-      await this.sp.web.lists.getByTitle(LISTS.subcategories).items.select('Id', 'Title', 'CategoryId', 'SortOrder').top(4000)();
-    return items.map((i) => ({ id: i.Id, title: i.Title, categoryId: i.CategoryId || 0, sortOrder: i.SortOrder || 0 }));
-  }
-
-  private async loadTemplates(): Promise<ITemplate[]> {
-    const items: { Id: number; Title: string; IsBuiltin?: boolean; TasksJson?: string }[] =
-      await this.sp.web.lists.getByTitle(LISTS.templates).items.select('Id', 'Title', 'IsBuiltin', 'TasksJson').top(500)();
-    return items.map((i) => {
-      let tasks: ITemplateTask[] = [];
-      try {
-        const parsed = JSON.parse(i.TasksJson || '[]');
-        if (Array.isArray(parsed)) tasks = parsed as ITemplateTask[];
-      } catch {
-        tasks = [];
-      }
-      return { id: i.Id, name: i.Title, builtin: !!i.IsBuiltin, tasks };
-    }).sort((a, b) => (a.builtin === b.builtin ? a.name.localeCompare(b.name) : (a.builtin ? -1 : 1)));
-  }
-
-  private async loadRegistry(): Promise<IEventItem[]> {
-    interface IRow {
-      Id: number; Title: string; LibraryId?: string; LibraryServerRelativeUrl?: string;
-      Section?: string; Status?: string; EventDate?: string; EventTime?: string; Venue?: string;
-      Category?: { Id: number; Title: string }; Subcategory?: { Id: number; Title: string };
+    const phaseList = this.sp.web.lists.getByTitle(LISTS.phases);
+    for (let i = 0; i < missingPhases.length; i++) {
+      await phaseList.items.add({ Title: missingPhases[i], SortOrder: phases.length + i + 1 });
     }
-    const items: IRow[] = await this.sp.web.lists.getByTitle(LISTS.registry).items
+    const templateList = this.sp.web.lists.getByTitle(LISTS.templates);
+    for (const seed of missingTemplates) {
+      await templateList.items.add({ Title: seed.name, IsBuiltin: true, TasksJson: JSON.stringify(seed.tasks) });
+    }
+    return true;
+  }
+
+  /* Each query is built against whatever SPFI it is handed, so load() can pass
+     the batched one and every read leaves in a single request. */
+
+  private phasesQuery(sp: SPFI): Promise<IRawPhase[]> {
+    return sp.web.lists.getByTitle(LISTS.phases).items.select('Id', 'Title', 'SortOrder').top(500)();
+  }
+
+  private categoriesQuery(sp: SPFI): Promise<IRawCategory[]> {
+    return sp.web.lists.getByTitle(LISTS.categories).items.select('Id', 'Title', 'Section', 'SortOrder').top(2000)();
+  }
+
+  private subcategoriesQuery(sp: SPFI): Promise<IRawSubcategory[]> {
+    return sp.web.lists.getByTitle(LISTS.subcategories).items.select('Id', 'Title', 'CategoryId', 'SortOrder').top(4000)();
+  }
+
+  private templatesQuery(sp: SPFI): Promise<IRawTemplate[]> {
+    return sp.web.lists.getByTitle(LISTS.templates).items.select('Id', 'Title', 'IsBuiltin', 'TasksJson').top(500)();
+  }
+
+  private registryQuery(sp: SPFI): Promise<IRawEvent[]> {
+    return sp.web.lists.getByTitle(LISTS.registry).items
       .select('Id', 'Title', 'LibraryId', 'LibraryServerRelativeUrl', 'Section', 'Status', 'EventDate', 'EventTime', 'Venue',
         'Category/Id', 'Category/Title', 'Subcategory/Id', 'Subcategory/Title')
       .expand('Category', 'Subcategory')
       .top(5000)();
-
-    return items.map((i) => ({
-      id: i.Id,
-      name: i.Title,
-      libraryId: (i.LibraryId || '').toLowerCase(),
-      libraryUrl: i.LibraryServerRelativeUrl || '',
-      entity: i.Section || '',
-      cat: i.Category && i.Category.Title ? i.Category.Title : '',
-      sub: i.Subcategory && i.Subcategory.Title ? i.Subcategory.Title : '',
-      catId: i.Category && i.Category.Id ? i.Category.Id : 0,
-      subId: i.Subcategory && i.Subcategory.Id ? i.Subcategory.Id : 0,
-      status: i.Status || 'Planning',
-      date: fromSpDate(i.EventDate),
-      time: i.EventTime || '',
-      venue: i.Venue || '',
-      tasks: []
-    }));
   }
 
-  private async loadTasks(): Promise<{ eventId: number; task: ITask }[]> {
-    interface IRow {
-      Id: number; Title: string; Completed?: boolean; DueDate?: string;
-      Event?: { Id: number }; Phase?: { Id: number; Title: string }; AssignedTo?: IRawPerson;
-    }
-    const items: IRow[] = await this.sp.web.lists.getByTitle(LISTS.tasks).items
+  private tasksQuery(sp: SPFI): Promise<IRawTask[]> {
+    return sp.web.lists.getByTitle(LISTS.tasks).items
       .select('Id', 'Title', 'Completed', 'DueDate', 'Event/Id', 'Phase/Id', 'Phase/Title',
         'AssignedTo/Id', 'AssignedTo/Title', 'AssignedTo/EMail', 'AssignedTo/Name')
       .expand('Event', 'Phase', 'AssignedTo')
       .top(5000)();
-
-    return items.map((i) => ({
-      eventId: i.Event && i.Event.Id ? i.Event.Id : 0,
-      task: {
-        id: i.Id,
-        text: i.Title,
-        phase: i.Phase && i.Phase.Title ? i.Phase.Title : '',
-        done: !!i.Completed,
-        due: fromSpDate(i.DueDate),
-        who: toPerson(i.AssignedTo)
-      }
-    }));
   }
 
   /* ================================================================ */
@@ -299,49 +369,32 @@ export class HubService {
       return true;
     });
 
-    const libraries: ILibrary[] = [];
-    for (const c of candidates) {
+    // The property bags all leave together, rather than one request per library.
+    const inherited: { [url: string]: { entity: string; cat: string; sub: string } } = {};
+    const [batch, execute] = this.sp.batched();
+    const pending: Promise<void>[] = [];
+    candidates.forEach((c) => {
       const url = c.RootFolder ? c.RootFolder.ServerRelativeUrl : '';
-      const inherited = await this.readPropertyBag(url);
-      libraries.push({
-        id: (c.Id || '').toLowerCase(),
-        name: c.Title,
-        url,
-        entity: inherited.entity,
-        cat: inherited.cat,
-        sub: inherited.sub
-      });
+      if (!url) return;
+      pending.push(
+        batch.web.getFolderByServerRelativePath(url).select('Properties').expand('Properties')()
+          .then((folder) => {
+            const props = (folder as unknown as { Properties?: { [key: string]: unknown } }).Properties;
+            inherited[url] = readInherited(props);
+          })
+          .catch(() => { inherited[url] = { entity: '', cat: '', sub: '' }; })
+      );
+    });
+    if (pending.length) {
+      await execute();
+      await Promise.all(pending);
     }
-    return libraries.sort((a, b) => a.name.localeCompare(b.name));
-  }
 
-  /** Adoption inheritance: EventSection, EventCategory, EventSubcategory on the root folder. */
-  private async readPropertyBag(serverRelativeUrl: string): Promise<{ entity: string; cat: string; sub: string }> {
-    const empty = { entity: '', cat: '', sub: '' };
-    if (!serverRelativeUrl) return empty;
-    try {
-      const folder: { Properties?: { [key: string]: unknown } } = await this.sp.web
-        .getFolderByServerRelativePath(serverRelativeUrl)
-        .select('Properties')
-        .expand('Properties')();
-      const props = folder.Properties || {};
-      const read = (key: string): string => {
-        const direct = props[key];
-        if (typeof direct === 'string') return direct;
-        // SharePoint encodes some property bag keys, so fall back to a loose match.
-        const match = Object.keys(props).filter((k) => k.replace(/_x[0-9a-f]{4}_/gi, '').toLowerCase() === key.toLowerCase())[0];
-        const value = match ? props[match] : undefined;
-        return typeof value === 'string' ? value : '';
-      };
-      const entity = read(PROPERTY_BAG_KEYS.section);
-      return {
-        entity: ENTITY_NAMES.indexOf(entity) > -1 ? entity : '',
-        cat: read(PROPERTY_BAG_KEYS.category),
-        sub: read(PROPERTY_BAG_KEYS.subcategory)
-      };
-    } catch {
-      return empty;
-    }
+    return candidates.map((c) => {
+      const url = c.RootFolder ? c.RootFolder.ServerRelativeUrl : '';
+      const tags = inherited[url] || { entity: '', cat: '', sub: '' };
+      return { id: (c.Id || '').toLowerCase(), name: c.Title, url, entity: tags.entity, cat: tags.cat, sub: tags.sub };
+    }).sort((a, b) => a.name.localeCompare(b.name));
   }
 
   /* ================================================================ */

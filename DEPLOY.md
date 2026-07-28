@@ -39,9 +39,11 @@ Six lists on the site the web part sits on:
 | Event Categories | Categories within a section |
 | Event Subcategories | Subcategories within a category |
 
-Provisioning is idempotent. Every load checks for missing lists, missing fields,
-and missing seed rows, and adds only what is absent, so reloading never
-duplicates anything.
+Provisioning is idempotent and only runs when it is needed. A normal load is a
+single batched read, and that read proves the schema is present because it
+selects every field the hub uses. If the read fails, the web part creates
+whatever is missing and reads again, so nothing is ever duplicated and ordinary
+visits pay nothing for the checks.
 
 The person who first loads the web part needs permission to create lists on the
 site, which means site owner or better. After provisioning, members can use the
